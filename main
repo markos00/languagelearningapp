@@ -1,5 +1,28 @@
-import React, { useState, useEffect } from 'react';
+import React, { useState, useEffect, useCallback, useMemo } from 'react';
 import { BookOpen, Plus, Trash2, Volume2, RotateCw, Check, X, Languages } from 'lucide-react';
+
+// Move static data outside component to prevent recreation on every render
+const availableLanguages = [
+  { code: 'none', name: 'None (English only)', flag: '🇬🇧' },
+  { code: 'romanian', name: 'Romanian', flag: '🇷🇴' },
+  { code: 'spanish', name: 'Spanish', flag: '🇪🇸' },
+  { code: 'french', name: 'French', flag: '🇫🇷' },
+  { code: 'italian', name: 'Italian', flag: '🇮🇹' },
+  { code: 'portuguese', name: 'Portuguese', flag: '🇵🇹' },
+  { code: 'russian', name: 'Russian', flag: '🇷🇺' },
+  { code: 'polish', name: 'Polish', flag: '🇵🇱' },
+  { code: 'dutch', name: 'Dutch', flag: '🇳🇱' },
+  { code: 'turkish', name: 'Turkish', flag: '🇹🇷' },
+  { code: 'swedish', name: 'Swedish', flag: '🇸🇪' },
+  { code: 'japanese', name: 'Japanese', flag: '🇯🇵' },
+  { code: 'chinese', name: 'Chinese', flag: '🇨🇳' },
+  { code: 'arabic', name: 'Arabic', flag: '🇸🇦' },
+  { code: 'hindi', name: 'Hindi', flag: '🇮🇳' }
+];
+
+// API Key configuration - Set this via environment variable or direct assignment
+// For production: Use environment variables like REACT_APP_ANTHROPIC_API_KEY
+const ANTHROPIC_API_KEY = process.env.REACT_APP_ANTHROPIC_API_KEY || '';
 
 export default function LanguageLearningApp() {
   const [words, setWords] = useState([]);
@@ -11,23 +34,8 @@ export default function LanguageLearningApp() {
   const [stats, setStats] = useState({ correct: 0, total: 0 });
   const [selectedLanguage, setSelectedLanguage] = useState('romanian');
 
-  const availableLanguages = [
-    { code: 'none', name: 'None (English only)', flag: '🇬🇧' },
-    { code: 'romanian', name: 'Romanian', flag: '🇷🇴' },
-    { code: 'spanish', name: 'Spanish', flag: '🇪🇸' },
-    { code: 'french', name: 'French', flag: '🇫🇷' },
-    { code: 'italian', name: 'Italian', flag: '🇮🇹' },
-    { code: 'portuguese', name: 'Portuguese', flag: '🇵🇹' },
-    { code: 'russian', name: 'Russian', flag: '🇷🇺' },
-    { code: 'polish', name: 'Polish', flag: '🇵🇱' },
-    { code: 'dutch', name: 'Dutch', flag: '🇳🇱' },
-    { code: 'turkish', name: 'Turkish', flag: '🇹🇷' },
-    { code: 'swedish', name: 'Swedish', flag: '🇸🇪' },
-    { code: 'japanese', name: 'Japanese', flag: '🇯🇵' },
-    { code: 'chinese', name: 'Chinese', flag: '🇨🇳' },
-    { code: 'arabic', name: 'Arabic', flag: '🇸🇦' },
-    { code: 'hindi', name: 'Hindi', flag: '🇮🇳' }
-  ];
+  // Cache speech synthesis voices
+  const [cachedVoices, setCachedVoices] = useState([]);
 
   // Load words from localStorage on mount
   useEffect(() => {
@@ -48,16 +56,39 @@ export default function LanguageLearningApp() {
     }
   }, [words]);
 
-  const addWord = async () => {
-    if (!newWord.trim()) return;
-    
-    setIsLoading(true);
-    try {
-      const languageName = availableLanguages.find(lang => lang.code === selectedLanguage)?.name || 'Romanian';
-      const isEnglishOnly = selectedLanguage === 'none';
-      
-      const promptContent = isEnglishOnly 
-        ? `Provide translation and learning information for the German word: "${newWord.trim()}"
+  // Load and cache speech synthesis voices
+  useEffect(() => {
+    const loadVoices = () => {
+      const voices = speechSynthesis.getVoices();
+      if (voices.length > 0) {
+        setCachedVoices(voices);
+      }
+    };
+
+    // Voices might not be loaded immediately
+    loadVoices();
+
+    // Listen for voices changed event (some browsers load voices asynchronously)
+    if (speechSynthesis.onvoiceschanged !== undefined) {
+      speechSynthesis.onvoiceschanged = loadVoices;
+    }
+
+    return () => {
+      if (speechSynthesis.onvoiceschanged !== undefined) {
+        speechSynthesis.onvoiceschanged = null;
+      }
+    };
+  }, []);
+
+  // Memoize prompt generation function
+  const generatePrompt = useCallback((word, languageCode) => {
+    const languageName = availableLanguages.find(lang => lang.code === languageCode)?.name || 'Romanian';
+    const isEnglishOnly = languageCode === 'none';
+
+    const baseInstructions = 'DO NOT include any text outside the JSON. DO NOT use markdown code blocks. ONLY output the JSON object.';
+
+    if (isEnglishOnly) {
+      return `Provide translation and learning information for the German word: "${word}"
 
 Please respond ONLY with a valid JSON object in this exact format (no additional text, no markdown code blocks):
 {
@@ -69,8 +100,10 @@ Please respond ONLY with a valid JSON object in this exact format (no additional
   "exampleEnglish": "English translation of the example sentence"
 }
 
-DO NOT include any text outside the JSON. DO NOT use markdown code blocks. ONLY output the JSON object.`
-        : `Provide translation and learning information for the German word: "${newWord.trim()}"
+${baseInstructions}`;
+    }
+
+    return `Provide translation and learning information for the German word: "${word}"
 
 Please respond ONLY with a valid JSON object in this exact format (no additional text, no markdown code blocks):
 {
@@ -84,59 +117,94 @@ Please respond ONLY with a valid JSON object in this exact format (no additional
   "exampleTranslation": "${languageName} translation of the example sentence"
 }
 
-DO NOT include any text outside the JSON. DO NOT use markdown code blocks. ONLY output the JSON object.`;
+${baseInstructions}`;
+  }, []);
+
+  const addWord = useCallback(async () => {
+    if (!newWord.trim()) return;
+
+    // Check for API key
+    if (!ANTHROPIC_API_KEY) {
+      alert("API key is not configured. Please set REACT_APP_ANTHROPIC_API_KEY environment variable.");
+      return;
+    }
+
+    setIsLoading(true);
+    try {
+      const promptContent = generatePrompt(newWord.trim(), selectedLanguage);
 
       const response = await fetch("https://api.anthropic.com/v1/messages", {
         method: "POST",
         headers: {
           "Content-Type": "application/json",
+          "x-api-key": ANTHROPIC_API_KEY,
+          "anthropic-version": "2023-06-01"
         },
         body: JSON.stringify({
           model: "claude-sonnet-4-20250514",
           max_tokens: 1000,
           messages: [
-            { 
-              role: "user", 
+            {
+              role: "user",
               content: promptContent
             }
           ]
         })
       });
 
+      if (!response.ok) {
+        throw new Error(`API request failed with status ${response.status}: ${response.statusText}`);
+      }
+
       const data = await response.json();
+
+      // Better error handling for API response
+      if (!data.content || !data.content[0] || !data.content[0].text) {
+        throw new Error("Invalid API response format");
+      }
+
       let responseText = data.content[0].text;
-      
+
       // Clean up the response
       responseText = responseText.replace(/```json\n?/g, "").replace(/```\n?/g, "").trim();
-      
-      const wordData = JSON.parse(responseText);
-      
-      setWords([...words, { ...wordData, id: Date.now(), language: selectedLanguage }]);
+
+      let wordData;
+      try {
+        wordData = JSON.parse(responseText);
+      } catch (parseError) {
+        console.error("JSON parse error:", parseError);
+        throw new Error("Failed to parse API response as JSON");
+      }
+
+      // Use functional update to avoid stale closure
+      setWords(prevWords => [...prevWords, { ...wordData, id: Date.now(), language: selectedLanguage }]);
       setNewWord('');
     } catch (error) {
       console.error("Error adding word:", error);
-      alert("Error adding word. Please try again.");
+      alert(`Error adding word: ${error.message}. Please try again.`);
     } finally {
       setIsLoading(false);
     }
-  };
+  }, [newWord, selectedLanguage, generatePrompt]);
 
-  const deleteWord = (id) => {
-    const updatedWords = words.filter(w => w.id !== id);
-    setWords(updatedWords);
-    if (updatedWords.length === 0) {
-      localStorage.removeItem('germanWords');
-    }
-  };
+  const deleteWord = useCallback((id) => {
+    setWords(prevWords => {
+      const updatedWords = prevWords.filter(w => w.id !== id);
+      if (updatedWords.length === 0) {
+        localStorage.removeItem('germanWords');
+      }
+      return updatedWords;
+    });
+  }, []);
 
-  const clearAllWords = () => {
+  const clearAllWords = useCallback(() => {
     if (window.confirm('Are you sure you want to delete all words? This cannot be undone.')) {
       setWords([]);
       localStorage.removeItem('germanWords');
     }
-  };
+  }, []);
 
-  const startLearning = () => {
+  const startLearning = useCallback(() => {
     if (words.length === 0) {
       alert("Please add some words first!");
       return;
@@ -145,61 +213,73 @@ DO NOT include any text outside the JSON. DO NOT use markdown code blocks. ONLY 
     setCurrentCardIndex(0);
     setShowAnswer(false);
     setStats({ correct: 0, total: 0 });
-  };
+  }, [words.length]);
 
-  const nextCard = () => {
-    if (currentCardIndex < words.length - 1) {
-      setCurrentCardIndex(currentCardIndex + 1);
-      setShowAnswer(false);
-    } else {
-      setMode('list');
-      alert(`Learning session complete! Score: ${stats.correct}/${stats.total}`);
-    }
-  };
+  const nextCard = useCallback(() => {
+    setCurrentCardIndex(prevIndex => {
+      if (prevIndex < words.length - 1) {
+        setShowAnswer(false);
+        return prevIndex + 1;
+      } else {
+        setMode('list');
+        alert(`Learning session complete! Score: ${stats.correct}/${stats.total}`);
+        return prevIndex;
+      }
+    });
+  }, [words.length, stats.correct, stats.total]);
 
-  const markCorrect = () => {
-    setStats({ ...stats, correct: stats.correct + 1, total: stats.total + 1 });
+  const markCorrect = useCallback(() => {
+    setStats(prevStats => ({
+      correct: prevStats.correct + 1,
+      total: prevStats.total + 1
+    }));
     nextCard();
-  };
+  }, [nextCard]);
 
-  const markIncorrect = () => {
-    setStats({ ...stats, total: stats.total + 1 });
+  const markIncorrect = useCallback(() => {
+    setStats(prevStats => ({
+      ...prevStats,
+      total: prevStats.total + 1
+    }));
     nextCard();
-  };
+  }, [nextCard]);
 
-  const speak = (text) => {
+  // Optimized speak function using cached voices
+  const speak = useCallback((text) => {
     if ('speechSynthesis' in window) {
       const utterance = new SpeechSynthesisUtterance(text);
       utterance.lang = 'de-DE';
       utterance.rate = 0.85; // Slower = more natural
       utterance.pitch = 1.0;
       utterance.volume = 1.0;
-      
-      // Try to use a better quality voice if available
-      const voices = speechSynthesis.getVoices();
-      const germanVoice = voices.find(voice => 
-        voice.lang.startsWith('de') && (voice.name.includes('Premium') || voice.name.includes('Enhanced'))
-      ) || voices.find(voice => voice.lang.startsWith('de'));
-      
-      if (germanVoice) {
-        utterance.voice = germanVoice;
+
+      // Use cached voices instead of fetching every time
+      if (cachedVoices.length > 0) {
+        const germanVoice = cachedVoices.find(voice =>
+          voice.lang.startsWith('de') && (voice.name.includes('Premium') || voice.name.includes('Enhanced'))
+        ) || cachedVoices.find(voice => voice.lang.startsWith('de'));
+
+        if (germanVoice) {
+          utterance.voice = germanVoice;
+        }
       }
-      
+
       speechSynthesis.speak(utterance);
     } else {
       alert("Text-to-speech is not supported in your browser");
     }
-  };
+  }, [cachedVoices]);
 
-  const getLanguageName = (languageCode) => {
+  // Memoize computed values
+  const getLanguageName = useMemo(() => (languageCode) => {
     const lang = availableLanguages.find(l => l.code === languageCode);
     return lang ? lang.name : 'Romanian';
-  };
+  }, []);
 
-  const getLanguageFlag = (languageCode) => {
+  const getLanguageFlag = useMemo(() => (languageCode) => {
     const lang = availableLanguages.find(l => l.code === languageCode);
     return lang ? lang.flag : '🇷🇴';
-  };
+  }, []);
 
   return (
     <div className="min-h-screen bg-gradient-to-br from-blue-50 to-indigo-100 p-6">
